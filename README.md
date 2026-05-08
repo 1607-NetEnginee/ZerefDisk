@@ -1,8 +1,15 @@
-# ZerefDisk
-SSD Forensic & Revival Engine
+# 💀 ZerefDisk
+> SSD Forensic & Revival Engine — "Even the dead deserve a verdict."
 
-ZerefDisk adalah alat forensik digital yang dirancang khusus untuk analisis dan pemulihan data pada drive SSD.
+## Install
+```bash
+sudo apt install smartmontools nvme-cli hdparm
+sudo dpkg -i zeRefdisk_1.0.0_all.deb
+```
 
-## Struktur Paket
-- **DEBIAN/**: Konfigurasi paket Debian.
-- **usr/bin/**: Skrip utama aplikasi.
+## Usage
+```bash
+sudo zeRefdisk              # scan semua SSD
+sudo zeRefdisk /dev/sda     # scan spesifik
+sudo zeRefdisk --history    # lihat history
+```
