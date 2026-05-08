@@ -1,0 +1,18 @@
+#!/bin/bash
+# postinst - runs after zeRefdisk is installed
+set -e
+
+# Create data directory
+mkdir -p /var/lib/zeRefdisk
+chmod 755 /var/lib/zeRefdisk
+
+# Make binary executable
+chmod +x /usr/bin/zeRefdisk
+
+echo ""
+echo "  ▓▒░ ZerefDisk v1.0.0 installed successfully ░▒▓"
+echo "  Usage: sudo zeRefdisk"
+echo "  Help : sudo zeRefdisk --help"
+echo ""
+
+exit 0

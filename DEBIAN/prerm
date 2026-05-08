@@ -1,0 +1,9 @@
+#!/bin/bash
+# prerm - runs before zeRefdisk is removed
+set -e
+
+echo "  Menghapus ZerefDisk..."
+echo "  History scan tersimpan di /var/lib/zeRefdisk/history.db"
+echo "  Hapus manual jika tidak diperlukan lagi."
+
+exit 0

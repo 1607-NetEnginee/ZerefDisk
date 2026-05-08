@@ -1,0 +1,898 @@
+#!/usr/bin/env python3
+# -*- coding: utf-8 -*-
+"""
+ZerefDisk v1.0.0 — SSD Forensic & Revival Engine
+Inspired by Zeref Dragneel (Fairy Tail)
+"Even the dead deserve a verdict."
+"""
+
+import os, sys, subprocess, json, re, sqlite3, time, shutil
+from datetime import datetime
+from pathlib import Path
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  ROOT CHECK
+# ──────────────────────────────────────────────────────────────────────────────
+def check_root():
+    if os.geteuid() != 0:
+        print("\033[31m[!] ZerefDisk membutuhkan akses root.\033[0m")
+        print("    Jalankan dengan: \033[1msudo zeRefdisk\033[0m")
+        sys.exit(1)
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  COLORS
+# ──────────────────────────────────────────────────────────────────────────────
+class C:
+    RED    = "\033[31m"
+    GREEN  = "\033[32m"
+    YELLOW = "\033[33m"
+    BLUE   = "\033[34m"
+    PURPLE = "\033[35m"
+    CYAN   = "\033[36m"
+    WHITE  = "\033[37m"
+    GRAY   = "\033[90m"
+    BOLD   = "\033[1m"
+    DIM    = "\033[2m"
+    RESET  = "\033[0m"
+
+VERSION = "1.0.0"
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  BANNER  (satu baris, compact seperti sqlmap)
+# ──────────────────────────────────────────────────────────────────────────────
+def print_banner():
+    print()
+    print(
+        f"  {C.PURPLE}{C.BOLD}▓▒░ ZerefDisk v{VERSION} ░▒▓{C.RESET}"
+        f"  {C.WHITE}SSD Forensic & Revival Engine{C.RESET}"
+        f"  {C.GRAY}~ \"Even the dead deserve a verdict.\"{C.RESET}"
+    )
+    print(f"  {C.GRAY}{'─' * 65}{C.RESET}")
+    print()
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  ASCII ART VERDICTS
+# ──────────────────────────────────────────────────────────────────────────────
+SKULL = f"""{C.RED}
+    ░░░░░░░░░░░░░░░
+   ░  .----------.  ░
+   ░ /  ◉      ◉  \\ ░
+   ░|       △      |░
+   ░|   `────────` |░
+   ░ \\____________/ ░
+   ░  |___|__|___|  ░
+    ░░░░░░░░░░░░░░░
+{C.RESET}
+  {C.RED}{C.BOLD}  ══════════════════════
+      💀  DRIVE IS DEAD
+  ══════════════════════{C.RESET}
+  {C.RED}  Kerusakan di level controller/firmware.
+  Software tidak bisa membantu lebih jauh.{C.RESET}
+"""
+
+BOO = f"""{C.WHITE}
+       .~~~~~~~~~~~.
+     (   ◉       ◉  )
+     (       ∧      )
+     (   `────────` )
+     (   ~~~~~~~~~~  )
+       ' .,______,. '
+{C.RESET}
+  {C.GRAY}{C.BOLD}  ══════════════════════════════
+      👻  GHOST DEVICE DETECTED
+  ══════════════════════════════{C.RESET}
+  {C.GRAY}  Terdeteksi tapi tidak merespons.
+  Mungkin masih bisa di-recover!{C.RESET}
+"""
+
+def show_dying():
+    print(f"""
+  {C.YELLOW}  ╔══════════════════════════════╗
+  ║  ⚠   DRIVE IS DYING          ║
+  ║  Backup data SEKARANG juga!  ║
+  ╚══════════════════════════════╝{C.RESET}
+""")
+
+def show_warning():
+    print(f"""
+  {C.YELLOW}  ╔══════════════════════════════╗
+  ║  ⚡  DRIVE HAS ISSUES        ║
+  ║  Monitor secara berkala.    ║
+  ╚══════════════════════════════╝{C.RESET}
+""")
+
+def show_healthy():
+    print(f"""
+  {C.GREEN}  ╔══════════════════════════╗
+  ║  ✔   DRIVE IS HEALTHY    ║
+  ║  Tidak ada masalah kritis ║
+  ╚══════════════════════════╝{C.RESET}
+""")
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  LOGGER & SECTION HELPERS
+# ──────────────────────────────────────────────────────────────────────────────
+def log(msg, level="INFO"):
+    icons = {
+        "INFO":    (C.CYAN,   "[*]"),
+        "OK":      (C.GREEN,  "[✓]"),
+        "WARN":    (C.YELLOW, "[!]"),
+        "ERROR":   (C.RED,    "[✗]"),
+        "STEP":    (C.BLUE,   "[→]"),
+        "SECTION": (C.PURPLE, "[═]"),
+    }
+    color, icon = icons.get(level, (C.WHITE, "[?]"))
+    print(f"  {color}{icon}{C.RESET} {msg}")
+
+def section(title):
+    print(f"\n  {C.PURPLE}{'═' * 55}{C.RESET}")
+    print(f"  {C.PURPLE}{C.BOLD}   {title}{C.RESET}")
+    print(f"  {C.PURPLE}{'═' * 55}{C.RESET}\n")
+
+def spinner_log(msg):
+    frames = ["⣾","⣽","⣻","⢿","⡿","⣟","⣯","⣷"]
+    for i in range(12):
+        print(f"  {C.CYAN}{frames[i % 8]}{C.RESET} {msg}...", end="\r", flush=True)
+        time.sleep(0.08)
+    print(f"  {C.CYAN}●{C.RESET} {msg}   ")
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  UTILITIES
+# ──────────────────────────────────────────────────────────────────────────────
+def run(cmd, timeout=15):
+    try:
+        r = subprocess.run(cmd, shell=True, capture_output=True, text=True, timeout=timeout)
+        return r.stdout, r.stderr, r.returncode
+    except subprocess.TimeoutExpired:
+        return "", "TIMEOUT", 1
+    except Exception as e:
+        return "", str(e), 1
+
+def tool_ok(name):
+    return shutil.which(name) is not None
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  DATABASE
+# ──────────────────────────────────────────────────────────────────────────────
+DB_PATH = Path("/var/lib/zeRefdisk/history.db")
+
+def init_db():
+    DB_PATH.parent.mkdir(parents=True, exist_ok=True)
+    conn = sqlite3.connect(DB_PATH)
+    conn.executescript("""
+        CREATE TABLE IF NOT EXISTS scans (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp   TEXT,
+            device      TEXT,
+            model       TEXT,
+            serial      TEXT,
+            size        TEXT,
+            verdict     TEXT,
+            score       INTEGER,
+            issues      TEXT,
+            warnings    TEXT
+        );
+        CREATE TABLE IF NOT EXISTS recovery_log (
+            id          INTEGER PRIMARY KEY AUTOINCREMENT,
+            timestamp   TEXT,
+            device      TEXT,
+            action      TEXT,
+            result      TEXT
+        );
+    """)
+    conn.commit()
+    return conn
+
+def db_save_scan(conn, dev, model, serial, size, verdict, score, issues, warnings):
+    conn.execute("""
+        INSERT INTO scans (timestamp,device,model,serial,size,verdict,score,issues,warnings)
+        VALUES (?,?,?,?,?,?,?,?,?)
+    """, (
+        datetime.now().isoformat(), dev, model, serial, size,
+        verdict, score,
+        json.dumps(issues),
+        json.dumps(warnings),
+    ))
+    conn.commit()
+
+def db_save_recovery(conn, device, action, result):
+    conn.execute("""
+        INSERT INTO recovery_log (timestamp,device,action,result)
+        VALUES (?,?,?,?)
+    """, (datetime.now().isoformat(), device, action, result))
+    conn.commit()
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  DEVICE DISCOVERY
+# ──────────────────────────────────────────────────────────────────────────────
+def discover_devices():
+    spinner_log("Scanning semua block devices")
+    out, _, rc = run("lsblk -J -o NAME,TYPE,SIZE,MODEL,VENDOR,TRAN,ROTA,SERIAL 2>/dev/null")
+    devices = []
+
+    if rc == 0 and out:
+        try:
+            data = json.loads(out)
+            for d in data.get("blockdevices", []):
+                if d.get("type") == "disk":
+                    devices.append({
+                        "name":   d.get("name", ""),
+                        "path":   f"/dev/{d.get('name','')}",
+                        "size":   d.get("size", "?"),
+                        "model":  (d.get("model") or "Unknown").strip(),
+                        "vendor": (d.get("vendor") or "").strip(),
+                        "tran":   (d.get("tran") or "").lower(),
+                        "rota":   d.get("rota", True),
+                        "serial": (d.get("serial") or "").strip(),
+                    })
+        except json.JSONDecodeError:
+            pass
+
+    # Fallback: /sys/block/
+    if not devices:
+        log("lsblk JSON gagal, fallback ke /sys/block/", "WARN")
+        for p in Path("/sys/block").iterdir():
+            if re.match(r"(sd|nvme|vd)", p.name):
+                size_f = p / "size"
+                size_bytes = 0
+                try:
+                    size_bytes = int(size_f.read_text().strip()) * 512
+                except Exception:
+                    pass
+                devices.append({
+                    "name":   p.name,
+                    "path":   f"/dev/{p.name}",
+                    "size":   f"{size_bytes // (1024**3)}G" if size_bytes else "0G",
+                    "model":  "Unknown",
+                    "vendor": "",
+                    "tran":   "nvme" if "nvme" in p.name else "sata",
+                    "rota":   False,
+                    "serial": "",
+                })
+    return devices
+
+def get_dev_type(dev):
+    tran = dev.get("tran", "")
+    name = dev.get("name", "")
+    if "nvme" in name or tran == "nvme":
+        return "nvme"
+    if tran == "usb":
+        return "usb"
+    return "sata"
+
+def is_ghost(dev):
+    """Deteksi ghost: device muncul tapi size 0 atau tidak bisa dibaca."""
+    name = dev.get("name", "")
+    size = dev.get("size", "0")
+
+    # Size 0
+    if size in ("0", "0B", "0G", "0M", "", None):
+        return True
+
+    # Cek /sys/block/X/size
+    sys_size = Path(f"/sys/block/{name}/size")
+    if sys_size.exists():
+        try:
+            if int(sys_size.read_text().strip()) == 0:
+                return True
+        except Exception:
+            return True
+
+    # Quick read test
+    out, _, rc = run(f"dd if=/dev/{name} of=/dev/null bs=512 count=1 2>&1", timeout=5)
+    if rc != 0 and "Input/output error" in out:
+        return True
+
+    return False
+
+def get_device_info(path):
+    """Ambil model, serial, firmware dari smartctl -i"""
+    info = {"model": "Unknown", "serial": "Unknown", "firmware": "Unknown"}
+    out, _, rc = run(f"smartctl -i --json {path} 2>/dev/null")
+    try:
+        d = json.loads(out)
+        info["model"]    = d.get("model_name", "Unknown")
+        info["serial"]   = d.get("serial_number", "Unknown")
+        info["firmware"] = d.get("firmware_version", "Unknown")
+    except Exception:
+        # Parse text fallback
+        out2, _, _ = run(f"smartctl -i {path} 2>/dev/null")
+        for line in out2.splitlines():
+            ll = line.lower()
+            if "device model" in ll or "model family" in ll:
+                info["model"] = line.split(":", 1)[-1].strip()
+            elif "serial number" in ll:
+                info["serial"] = line.split(":", 1)[-1].strip()
+            elif "firmware version" in ll:
+                info["firmware"] = line.split(":", 1)[-1].strip()
+    return info
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  SMART DATA READERS
+# ──────────────────────────────────────────────────────────────────────────────
+def read_smart_sata(path):
+    if not tool_ok("smartctl"):
+        return None, "smartctl tidak tersedia"
+    out, err, rc = run(f"smartctl -a --json {path} 2>/dev/null")
+    try:
+        return json.loads(out), None
+    except Exception:
+        out2, _, _ = run(f"smartctl -a {path} 2>/dev/null")
+        return None, out2 or err
+
+def read_smart_nvme(path):
+    if not tool_ok("nvme"):
+        return None, "nvme-cli tidak tersedia"
+    out, err, rc = run(f"nvme smart-log {path} -o json 2>/dev/null")
+    try:
+        return json.loads(out), None
+    except Exception:
+        out2, _, _ = run(f"nvme smart-log {path} 2>/dev/null")
+        return None, out2 or err
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  DIAGNOSIS ENGINE
+# ──────────────────────────────────────────────────────────────────────────────
+
+# SMART attribute ID → (nama, jenis_check, threshold)
+# jenis: "bad" = raw > threshold → masalah
+#        "low" = value < threshold → masalah
+#        "warn" = raw > threshold → peringatan
+SMART_RULES = {
+    5:   ("Reallocated_Sector_Ct",   "bad",  0),
+    177: ("Wear_Leveling_Count",     "low",  10),
+    179: ("Used_Rsvd_Blk_Cnt_Tot",  "bad",  50),
+    181: ("Program_Fail_Cnt",        "bad",  0),
+    182: ("Erase_Fail_Count",        "bad",  0),
+    183: ("Runtime_Bad_Block",       "bad",  0),
+    187: ("Reported_Uncorrect",      "bad",  0),
+    188: ("Command_Timeout",         "warn", 50),
+    196: ("Reallocated_Event_Count", "bad",  0),
+    197: ("Current_Pending_Sector",  "bad",  0),
+    198: ("Offline_Uncorrectable",   "bad",  0),
+    199: ("UDMA_CRC_Error_Count",    "warn", 100),
+    231: ("SSD_Life_Left",           "low",  10),
+    233: ("Media_Wearout_Indicator", "low",  10),
+}
+
+class DiagnosisResult:
+    def __init__(self):
+        self.score    = 100
+        self.verdict  = "HEALTHY"
+        self.issues   = []
+        self.warnings = []
+        self.info     = []
+        self.is_ghost = False
+        self.is_dead  = False
+        self.smart_ok = False
+
+def diagnose_sata(smart_json, result):
+    if not smart_json:
+        result.warnings.append("SMART data tidak bisa dibaca (mungkin USB bridge)")
+        result.score -= 20
+        return
+
+    result.smart_ok = True
+
+    # Overall SMART pass/fail
+    status = smart_json.get("smart_status", {})
+    if not status.get("passed", True):
+        result.issues.append("SMART Self-Test: GAGAL (official verdict: drive bermasalah)")
+        result.score -= 50
+        result.is_dead = True
+
+    # Attribute table
+    ata = smart_json.get("ata_smart_attributes", {})
+    for attr in ata.get("table", []):
+        aid   = attr.get("id", 0)
+        name  = attr.get("name", f"ID_{aid}")
+        value = attr.get("value", 0)
+        worst = attr.get("worst", 0)
+        thresh = attr.get("thresh", 0)
+        raw   = attr.get("raw", {}).get("value", 0)
+
+        if aid in SMART_RULES:
+            _, kind, thr = SMART_RULES[aid]
+            if kind == "bad" and raw > thr:
+                result.issues.append(f"{name}: {raw} (harusnya 0)")
+                result.score -= 20
+            elif kind == "low" and value < thr:
+                result.issues.append(f"{name}: {value}% (kritis — di bawah {thr}%)")
+                result.score -= 25
+            elif kind == "warn" and raw > thr:
+                result.warnings.append(f"{name}: {raw}")
+                result.score -= 8
+
+        # Below threshold check
+        if thresh > 0 and value <= thresh:
+            result.issues.append(f"ATTR {aid} ({name}) di bawah threshold! ({value} ≤ {thresh})")
+            result.score -= 15
+
+    # Power-on hours
+    poh = 0
+    for attr in ata.get("table", []):
+        if attr.get("id") == 9:
+            poh = attr.get("raw", {}).get("value", 0)
+    if poh:
+        result.info.append(f"Power-on hours: {poh}h")
+        if poh > 50000:
+            result.warnings.append(f"Power-on hours sangat tinggi: {poh}h")
+            result.score -= 10
+        elif poh > 30000:
+            result.warnings.append(f"Power-on hours tinggi: {poh}h")
+            result.score -= 5
+
+def diagnose_nvme(smart_json, raw_text, result):
+    if smart_json:
+        result.smart_ok = True
+
+        crit = smart_json.get("critical_warning", 0)
+        if crit > 0:
+            result.issues.append(f"NVMe Critical Warning aktif: 0x{crit:02x}")
+            result.score -= 40
+
+        media_err = smart_json.get("media_errors", 0)
+        if media_err > 0:
+            result.issues.append(f"Media Errors: {media_err}")
+            result.score -= 20
+
+        err_log = smart_json.get("num_err_log_entries", 0)
+        if err_log > 0:
+            result.warnings.append(f"Error log entries: {err_log}")
+            result.score -= 10
+
+        pct_used = smart_json.get("percent_used", 0)
+        if pct_used >= 100:
+            result.issues.append(f"Wear: {pct_used}% — drive wear habis!")
+            result.score -= 35
+        elif pct_used >= 80:
+            result.warnings.append(f"Wear: {pct_used}% — mendekati batas")
+            result.score -= 15
+        result.info.append(f"Drive wear: {pct_used}%")
+
+        spare = smart_json.get("available_spare", 100)
+        spare_thr = smart_json.get("available_spare_threshold", 10)
+        if spare <= spare_thr:
+            result.issues.append(f"Available spare: {spare}% (di bawah threshold {spare_thr}%)")
+            result.score -= 25
+        result.info.append(f"Available spare: {spare}%")
+
+        temp = smart_json.get("temperature", 0)
+        result.info.append(f"Temperatur: {temp}°C")
+        if temp > 75:
+            result.warnings.append(f"Temperatur sangat tinggi: {temp}°C")
+            result.score -= 15
+        elif temp > 65:
+            result.warnings.append(f"Temperatur tinggi: {temp}°C")
+            result.score -= 5
+
+        poh = smart_json.get("power_on_hours", 0)
+        result.info.append(f"Power-on hours: {poh}h")
+
+    elif raw_text:
+        result.smart_ok = True
+        if re.search(r"critical_warning\s*:\s*[1-9]", raw_text, re.I):
+            result.issues.append("NVMe Critical Warning aktif")
+            result.score -= 40
+
+def check_kernel_errors(name, result):
+    """Parse dmesg untuk error terkait device ini."""
+    out, _, _ = run(f"dmesg 2>/dev/null | grep -i '{name}' | tail -30")
+    patterns = [
+        (r"I/O error",              "I/O Error di kernel log",              20),
+        (r"hardware error",         "Hardware error di kernel log",          25),
+        (r"failed command",         "Failed command di kernel log",          15),
+        (r"Medium Error",           "Medium Error (bad sector?)",            25),
+        (r"Unhandled sense",        "Unhandled sense error",                 20),
+        (r"exception.*error",       "Exception error",                       20),
+        (r"timeout",                "Timeout error",                         10),
+        (r"reset.*failed",          "Reset failed",                          15),
+    ]
+    for pattern, msg, penalty in patterns:
+        if re.search(pattern, out, re.I):
+            result.issues.append(f"[kernel dmesg] {msg}")
+            result.score -= penalty
+
+def finalize_verdict(result):
+    result.score = max(0, min(100, result.score))
+    if result.is_ghost:
+        result.verdict = "GHOST"
+    elif result.is_dead or result.score <= 5:
+        result.verdict = "DEAD"
+        result.score = 0
+    elif result.score <= 30:
+        result.verdict = "DYING"
+    elif result.score <= 60:
+        result.verdict = "WARNING"
+    else:
+        result.verdict = "HEALTHY"
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  RECOVERY ENGINE
+# ──────────────────────────────────────────────────────────────────────────────
+def recovery_step(label, cmd, device, conn, timeout=20):
+    log(f"Mencoba: {label}", "STEP")
+    _, err, rc = run(cmd, timeout=timeout)
+    if rc == 0:
+        log(f"{label}: Berhasil", "OK")
+        db_save_recovery(conn, device, label, "SUCCESS")
+        return True
+    else:
+        log(f"{label}: Gagal — {err.strip()[:80]}", "WARN")
+        db_save_recovery(conn, device, label, f"FAIL: {err.strip()[:100]}")
+        return False
+
+def attempt_recovery(dev, verdict, conn):
+    path     = dev["path"]
+    name     = dev["name"]
+    dev_type = get_dev_type(dev)
+
+    section("RECOVERY ATTEMPT ENGINE")
+
+    steps = []
+
+    # Universal steps
+    steps.append(("Rescan PCIe bus", "echo 1 > /sys/bus/pci/rescan 2>/dev/null"))
+
+    # SCSI host rescan
+    scsi_hosts = list(Path("/sys/class/scsi_host/").glob("host*"))
+    for h in scsi_hosts[:3]:  # limit 3 host
+        steps.append((f"Rescan SCSI {h.name}", f"echo '- - -' > {h}/scan 2>/dev/null"))
+
+    steps.append(("Re-read partition table", f"partprobe {path} 2>/dev/null || true"))
+
+    if dev_type == "sata":
+        steps.append(("hdparm identify", f"hdparm -I {path} 2>/dev/null || true"))
+        steps.append(("hdparm cache flush", f"hdparm -F {path} 2>/dev/null || true"))
+        steps.append(("SMART enable", f"smartctl -s on {path} 2>/dev/null || true"))
+
+    elif dev_type == "nvme":
+        steps.append(("NVMe reset", f"nvme reset {path} 2>/dev/null || true"))
+        steps.append(("NVMe subsystem reset", f"nvme subsystem-reset {path} 2>/dev/null || true"))
+
+    elif dev_type == "usb":
+        steps.append(("Reload USB storage driver", "modprobe -r usb_storage 2>/dev/null; sleep 2; modprobe usb_storage 2>/dev/null"))
+
+    if verdict == "GHOST":
+        steps.append(("Trigger udev re-detect", f"udevadm trigger --action=add /dev/{name} 2>/dev/null || true"))
+
+    success = 0
+    for label, cmd in steps:
+        if recovery_step(label, cmd, name, conn):
+            success += 1
+        time.sleep(0.5)
+
+    print()
+    log(f"Recovery selesai: {success}/{len(steps)} langkah berhasil", "INFO")
+
+    # Re-check setelah recovery
+    time.sleep(2)
+    log("Mengecek ulang device post-recovery...", "STEP")
+    sys_size = Path(f"/sys/block/{name}/size")
+    recovered = False
+    if sys_size.exists():
+        try:
+            if int(sys_size.read_text().strip()) > 0:
+                recovered = True
+        except Exception:
+            pass
+
+    if recovered:
+        log("Device sekarang merespons! Coba scan ulang.", "OK")
+    else:
+        log("Device masih tidak merespons.", "WARN")
+        if verdict in ("DEAD", "GHOST"):
+            print(f"\n  {C.YELLOW}Rekomendasi:{C.RESET}")
+            print(f"  • Coba ganti kabel SATA atau enclosure USB")
+            print(f"  • Gunakan tools firmware vendor (Samsung Magician, dll)")
+            print(f"  • Hubungi data recovery specialist jika data penting")
+            print(f"  • Kerusakan controller/firmware → di luar kemampuan software\n")
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  MAIN SCAN
+# ──────────────────────────────────────────────────────────────────────────────
+def scan_device(dev, conn):
+    path     = dev["path"]
+    name     = dev["name"]
+    dev_type = get_dev_type(dev)
+    result   = DiagnosisResult()
+
+    section(f"FORENSIC SCAN  ▸  {path}")
+
+    # ── Phase 1: Identifikasi ────────────────────────────────────────────────
+    log("Phase 1 — Identifikasi Device", "SECTION")
+    spinner_log("Membaca identitas device")
+    info = get_device_info(path)
+    model  = info.get("model") or dev.get("model", "Unknown")
+    serial = info.get("serial") or dev.get("serial", "Unknown")
+    fw     = info.get("firmware", "Unknown")
+    size   = dev.get("size", "?")
+
+    log(f"Path      : {path}", "INFO")
+    log(f"Type      : {dev_type.upper()}", "INFO")
+    log(f"Model     : {model}", "INFO")
+    log(f"Serial    : {serial}", "INFO")
+    log(f"Firmware  : {fw}", "INFO")
+    log(f"Kapasitas : {size}", "INFO")
+
+    # ── Phase 2: Ghost Detection ─────────────────────────────────────────────
+    print()
+    log("Phase 2 — Ghost Detection", "SECTION")
+    spinner_log("Memeriksa eksistensi device")
+
+    if is_ghost(dev):
+        result.is_ghost = True
+        result.score = 0
+        result.issues.append("Device terdeteksi oleh sistem tapi tidak merespons")
+        finalize_verdict(result)
+
+        print(BOO)
+        db_save_scan(conn, path, model, serial, size,
+                     result.verdict, result.score, result.issues, result.warnings)
+
+        ans = input(f"  {C.CYAN}Coba Ghost Recovery? [y/N]:{C.RESET} ").strip().lower()
+        if ans == "y":
+            attempt_recovery(dev, "GHOST", conn)
+        return result
+
+    log("Ghost check: CLEAR — device merespons secara normal", "OK")
+
+    # ── Phase 3: Kernel Error Analysis ──────────────────────────────────────
+    print()
+    log("Phase 3 — Kernel Error Analysis (dmesg)", "SECTION")
+    spinner_log("Menganalisa kernel log")
+    before_score = result.score
+    check_kernel_errors(name, result)
+    deducted = before_score - result.score
+    if deducted > 0:
+        for issue in result.issues:
+            if "kernel" in issue:
+                print(f"    {C.RED}✗ {issue}{C.RESET}")
+        log(f"Score dikurangi {deducted} poin dari kernel errors", "WARN")
+    else:
+        log("Kernel log: BERSIH — tidak ada error terkait device ini", "OK")
+
+    # ── Phase 4: SMART Forensic ──────────────────────────────────────────────
+    print()
+    log("Phase 4 — SMART Data Forensic", "SECTION")
+    spinner_log("Membaca dan menganalisa SMART data")
+
+    if dev_type == "nvme":
+        smart_json, smart_text = read_smart_nvme(path)
+        if smart_json or smart_text:
+            log("NVMe SMART data berhasil dibaca", "OK")
+            diagnose_nvme(smart_json, smart_text, result)
+        else:
+            log("Gagal membaca NVMe SMART data", "WARN")
+            result.warnings.append("SMART tidak bisa dibaca")
+            result.score -= 20
+    else:
+        smart_json, smart_text = read_smart_sata(path)
+        if smart_json:
+            log("SATA SMART data berhasil dibaca", "OK")
+            diagnose_sata(smart_json, result)
+        else:
+            log("Gagal membaca SMART data", "WARN")
+            if dev_type == "usb":
+                log("USB bridge kemungkinan blokir SMART passthrough — normal", "INFO")
+            if smart_text and len(smart_text) > 10:
+                log(f"Detail: {smart_text[:120]}", "INFO")
+            result.score -= 20
+
+    # ── Phase 5: Diagnosis Final ──────────────────────────────────────────────
+    print()
+    log("Phase 5 — Diagnosis & Scoring", "SECTION")
+    finalize_verdict(result)
+
+    # Print findings
+    if result.issues:
+        log(f"Issues ditemukan ({len(result.issues)}):", "WARN")
+        for i in result.issues:
+            if "kernel" not in i:
+                print(f"    {C.RED}  ✗ {i}{C.RESET}")
+
+    if result.warnings:
+        log(f"Warnings ({len(result.warnings)}):", "WARN")
+        for w in result.warnings:
+            print(f"    {C.YELLOW}  ⚡ {w}{C.RESET}")
+
+    if result.info:
+        log("Info SMART:", "INFO")
+        for i in result.info:
+            print(f"    {C.CYAN}  ℹ {i}{C.RESET}")
+
+    # Health score bar
+    score = result.score
+    filled = int(score / 5)
+    bar_color = C.GREEN if score >= 70 else (C.YELLOW if score >= 40 else C.RED)
+    bar = f"{bar_color}{'█' * filled}{'░' * (20 - filled)}{C.RESET}"
+    print(f"\n  {C.BOLD}Health Score:{C.RESET} [{bar}] {bar_color}{C.BOLD}{score}/100{C.RESET}\n")
+
+    # ── Phase 6: Verdict ──────────────────────────────────────────────────────
+    log("Phase 6 — Final Verdict", "SECTION")
+
+    if result.verdict == "DEAD":
+        print(SKULL)
+    elif result.verdict == "GHOST":
+        print(BOO)
+    elif result.verdict == "DYING":
+        show_dying()
+    elif result.verdict == "WARNING":
+        show_warning()
+    else:
+        show_healthy()
+
+    # Save
+    db_save_scan(conn, path, model, serial, size,
+                 result.verdict, result.score, result.issues, result.warnings)
+
+    # ── Phase 7: Recovery Offer ───────────────────────────────────────────────
+    if result.verdict not in ("HEALTHY",):
+        ans = input(f"  {C.CYAN}Jalankan Recovery Attempt? [y/N]:{C.RESET} ").strip().lower()
+        if ans == "y":
+            attempt_recovery(dev, result.verdict, conn)
+
+    return result
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  HISTORY VIEWER
+# ──────────────────────────────────────────────────────────────────────────────
+def show_history(conn):
+    section("SCAN HISTORY")
+    rows = conn.execute("""
+        SELECT timestamp, device, model, verdict, score
+        FROM scans ORDER BY id DESC LIMIT 25
+    """).fetchall()
+
+    if not rows:
+        log("Belum ada data scan tersimpan", "INFO")
+        return
+
+    vc = {
+        "HEALTHY": C.GREEN,
+        "WARNING": C.YELLOW,
+        "DYING":   C.RED,
+        "DEAD":    C.RED,
+        "GHOST":   C.GRAY,
+    }
+
+    w = [20, 14, 28, 10, 5]
+    header = f"  {'Timestamp':<{w[0]}} {'Device':<{w[1]}} {'Model':<{w[2]}} {'Verdict':<{w[3]}} Score"
+    print(f"  {C.BOLD}{header}{C.RESET}")
+    print(f"  {'─' * (sum(w) + 10)}")
+
+    for ts, device, model, verdict, score in rows:
+        color = vc.get(verdict, C.WHITE)
+        model_trim = (model or "Unknown")[:w[2]-1]
+        print(f"  {ts[:19]:<{w[0]}} {device:<{w[1]}} {model_trim:<{w[2]}} "
+              f"{color}{verdict:<{w[3]}}{C.RESET} {score}")
+    print()
+
+# ──────────────────────────────────────────────────────────────────────────────
+#  MAIN
+# ──────────────────────────────────────────────────────────────────────────────
+def print_help():
+    print(f"""
+  {C.CYAN}Usage:{C.RESET}
+    sudo zeRefdisk                    Scan semua SSD / NVMe yang terdeteksi
+    sudo zeRefdisk /dev/sda           Scan device spesifik
+    sudo zeRefdisk /dev/nvme0         Scan NVMe spesifik
+    sudo zeRefdisk --all              Scan semua disk termasuk HDD
+    sudo zeRefdisk --history          Tampilkan history scan
+    sudo zeRefdisk --help             Tampilkan bantuan ini
+
+  {C.CYAN}Verdict:{C.RESET}
+    {C.GREEN}HEALTHY{C.RESET}   Drive sehat, tidak ada masalah
+    {C.YELLOW}WARNING{C.RESET}   Ada indikasi masalah, pantau terus
+    {C.RED}DYING{C.RESET}     Drive kritis, backup data segera!
+    {C.RED}DEAD{C.RESET}      Game over di level software
+    {C.GRAY}GHOST{C.RESET}     Terdeteksi tapi tidak merespons
+
+  {C.CYAN}Requires:{C.RESET}
+    sudo apt install smartmontools nvme-cli hdparm
+
+  {C.GRAY}History disimpan di: {DB_PATH}{C.RESET}
+""")
+
+def main():
+    check_root()
+    print_banner()
+
+    # Check tools
+    missing = [t for t in ["smartctl", "nvme", "hdparm"] if not tool_ok(t)]
+    if missing:
+        log(f"Tools tidak ditemukan: {', '.join(missing)}", "WARN")
+        log(f"Install: sudo apt install smartmontools nvme-cli hdparm", "INFO")
+
+    conn = init_db()
+    args = sys.argv[1:]
+
+    if not args or "--help" in args or "-h" in args:
+        if not args:
+            pass  # lanjut ke scan
+        else:
+            print_help()
+            conn.close()
+            return
+
+    if "--history" in args or "-H" in args:
+        show_history(conn)
+        conn.close()
+        return
+
+    scan_all = "--all" in args
+
+    # Device spesifik
+    target = next((a for a in args if a.startswith("/dev/")), None)
+    if target:
+        name = target.replace("/dev/", "")
+        out, _, _ = run(f"lsblk -J -o NAME,TYPE,SIZE,MODEL,TRAN,ROTA,SERIAL {target} 2>/dev/null")
+        dev = {
+            "name": name, "path": target,
+            "size": "?", "model": "Unknown",
+            "tran": "nvme" if "nvme" in name else "sata",
+            "rota": False, "serial": "",
+        }
+        try:
+            d = json.loads(out)["blockdevices"][0]
+            dev.update({
+                "size":   d.get("size", "?"),
+                "model":  (d.get("model") or "Unknown").strip(),
+                "tran":   (d.get("tran") or "").lower(),
+                "serial": (d.get("serial") or "").strip(),
+                "rota":   d.get("rota", False),
+            })
+        except Exception:
+            pass
+        devices = [dev]
+    else:
+        # Auto-discover
+        section("DEVICE DISCOVERY")
+        devices = discover_devices()
+
+        if not devices:
+            log("Tidak ada disk ditemukan!", "ERROR")
+            conn.close()
+            return
+
+        log(f"Ditemukan {len(devices)} disk:", "OK")
+        for d in devices:
+            rota_label = "HDD" if d.get("rota") else "SSD/NVMe"
+            log(f"  {d['path']:<14} [{get_dev_type(d).upper():<5}] "
+                f"{d.get('size','?'):>8}  {rota_label}  {d.get('model','')[:35]}", "INFO")
+
+        if not scan_all:
+            # Filter SSD only
+            ssds = [d for d in devices if not d.get("rota", True)]
+            hdds = [d for d in devices if d.get("rota", True)]
+            if hdds:
+                log(f"Mengabaikan {len(hdds)} HDD (gunakan --all untuk scan semua)", "INFO")
+            devices = ssds if ssds else devices
+
+    # Run scans
+    results = {}
+    for dev in devices:
+        r = scan_device(dev, conn)
+        results[dev["path"]] = r
+
+    # Summary
+    if len(results) > 1:
+        section("SUMMARY")
+        icons = {
+            "HEALTHY": f"{C.GREEN}✔ HEALTHY{C.RESET}",
+            "WARNING": f"{C.YELLOW}⚡ WARNING{C.RESET}",
+            "DYING":   f"{C.RED}⚠  DYING{C.RESET}",
+            "DEAD":    f"{C.RED}💀 DEAD{C.RESET}",
+            "GHOST":   f"{C.GRAY}👻 GHOST{C.RESET}",
+        }
+        for path, r in results.items():
+            icon = icons.get(r.verdict, r.verdict)
+            sc = C.GREEN if r.score >= 70 else (C.YELLOW if r.score >= 40 else C.RED)
+            print(f"  {path:<20} {icon:<30} Score: {sc}{r.score}/100{C.RESET}")
+
+    print(f"\n  {C.GRAY}History: sudo zeRefdisk --history{C.RESET}")
+    print(f"  {C.GRAY}DB     : {DB_PATH}{C.RESET}\n")
+    conn.close()
+
+if __name__ == "__main__":
+    main()

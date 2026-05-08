@@ -1,0 +1,22 @@
+Package: zeRefdisk
+Version: 1.0.0
+Section: utils
+Priority: optional
+Architecture: all
+Depends: python3 (>= 3.8), smartmontools, nvme-cli, hdparm, util-linux
+Maintainer: ZerefDisk Project <zeRefdisk@localhost>
+Homepage: https://github.com/yourname/zeRefdisk
+Description: SSD Forensic & Revival Engine
+ ZerefDisk adalah tools diagnostik SSD/NVMe berbasis forensik.
+ Mendeteksi, mendiagnosis, dan mencoba recovery pada SSD yang bermasalah.
+ .
+ Fitur utama:
+  - Deteksi otomatis semua SSD/NVMe/SATA/USB
+  - Analisa SMART data mendalam
+  - Kernel error analysis via dmesg
+  - Ghost device detection
+  - Automatic recovery attempt engine
+  - History tersimpan di SQLite
+ .
+ Verdict: HEALTHY / WARNING / DYING / DEAD / GHOST
+ "Even the dead deserve a verdict."
